@@ -1,0 +1,128 @@
+'LINEAR_REG
+'Version 1.0
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+' Set options
+Option Base 1
+Option Explicit
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'~~~~~~~ This Section contains the function that interface with Excel and the end user
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+'Forecasting function
+Public Function LINEAR_REG(known_y As Range, known_x As Range, Optional Constant As Boolean = True, Optional new_x As Range = Nothing) As Variant
+Dim k, j As Integer
+Dim dof As Integer
+Dim ry, cy, rx, cx, cnx, rnx, dx As Integer
+Dim y As Variant
+Dim x As Variant
+Dim temp As Double
+Dim results As Variant
+Dim out As Variant
+Dim Transpos As Boolean
+'On Error GoTo bug
+
+' Get size, shapes and data
+y = known_y.Value
+ry = known_y.rows.count
+cy = known_y.Columns.count
+x = known_x.Value
+rx = known_x.rows.count
+cx = known_x.Columns.count
+' Make sure y is univariate data
+If (ry > 1 And cy > 1) Then
+    LINEAR_REG = "Univariate Only"
+    Exit Function
+End If
+' Transpose for linest
+Transpos = False
+If (cy > ry) Then
+    y = WorksheetFunction.transpose(y)
+    x = WorksheetFunction.transpose(x)
+    ' update dimensions
+    temp = cy
+    cy = ry
+    ry = temp
+    temp = cx
+    cx = rx
+    rx = temp
+    Transpos = True
+End If
+
+' Make sure data matches
+If (ry <> rx) Then
+    LINEAR_REG = "X Y do not match"
+    Exit Function
+End If
+' Keep small for now
+If (cx > 64) Then
+    LINEAR_REG = "Too Large"
+    Exit Function
+End If
+
+If Not (new_x Is Nothing) Then  ' Forecast
+' Make sure the new x dimensons match
+    If Transpos Then
+        rnx = new_x.Columns.count
+        cnx = new_x.rows.count
+    Else
+        rnx = new_x.rows.count
+        cnx = new_x.Columns.count
+    End If
+    If cnx <> cx Then
+        LINEAR_REG = "new x doesn't match"
+        Exit Function
+    End If
+    results = WorksheetFunction.LinEst(y, x, Constant, False)
+    ' loop through and forecast
+    ReDim out(1 To rnx, 1 To 1)
+    For k = 1 To rnx
+        For j = 1 To cnx
+            If Transpos Then
+                out(k, 1) = out(k, 1) + results(cx - j + 1) * new_x(j, k)
+            Else
+                out(k, 1) = out(k, 1) + results(cx - j + 1) * new_x(k, j)
+            End If
+        Next j
+        If Constant Then
+            out(k, 1) = out(k, 1) + results(cx + 1)
+        End If
+    Next k
+    If Transpos Then ' Transpose to match inputs
+        out = WorksheetFunction.transpose(out)
+    End If
+
+Else ' Otherwise calculate statistics
+    results = WorksheetFunction.LinEst(y, x, Constant, True)
+    If Constant Then 'increase dimension by one
+        dx = cx + 1
+    Else
+        dx = cx
+    End If
+    dof = results(4, 2)
+    ReDim out(1 To 7, 1 To WorksheetFunction.Max(2, dx))
+    ' flip parameters and calcuate more stuff
+    For k = 1 To dx
+        out(1, k) = results(1, dx - k + 1)
+        out(2, k) = results(2, dx - k + 1)
+        If (Not out(2, k) = 0) Then
+            out(3, k) = out(1, k) / out(2, k)
+            out(4, k) = WorksheetFunction.T_Dist_2T(Math.Abs(out(3, k)), dof)
+        End If
+    Next k
+    ' copy the rest
+    For k = 5 To 7
+        For j = 1 To dx
+           If j < 3 Then
+                out(k, j) = results(k - 2, j)
+            Else
+                out(k, j) = CVErr(2042)
+            End If
+        Next j
+    Next k
+End If
+LINEAR_REG = out
+Exit Function
+bug:
+MsgBox " LINEAR Regression Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+

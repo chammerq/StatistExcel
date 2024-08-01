@@ -1,0 +1,210 @@
+'LOGISTICREG
+'Version 1.0.2
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+' Set options
+Option Base 1
+Option Explicit
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'~~~~~~~ This Section contains the function that interface with Excel and the end user
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+'Forecasting function
+Public Function LOGISTIC_REG(known_y As Range, known_x As Range, Optional new_x As Range = Nothing) As Variant
+Dim k, j, i As Integer
+Dim ry, cy, rx, cx, cnx, rnx As Integer
+Dim y As Variant
+Dim x As Variant
+Dim newx As Variant
+Dim temp As Double
+Dim beta() As Variant
+Dim delta_beta() As Variant
+Dim out As Variant
+Dim p() As Variant
+Dim Xh() As Variant
+Dim y_p() As Variant
+Dim dL As Variant
+Dim H As Variant
+Dim LogLik0, LogLik1, LogLik2 As Double
+Dim step As Double
+Dim mean1, mean2 As Double
+Dim Transpos As Boolean
+'On Error GoTo bug
+
+' Get size, shapes and data
+y = known_y.Value
+ry = known_y.rows.count
+cy = known_y.Columns.count
+x = known_x.Value
+rx = known_x.rows.count
+cx = known_x.Columns.count
+' Make sure y is univariate data
+If (ry > 1 And cy > 1) Then
+    LOGISTIC_REG = "Univariate Only"
+    Exit Function
+End If
+' Transpose for my sanity
+Transpos = False
+If (cy > ry) Then
+    y = WorksheetFunction.transpose(y)
+    x = WorksheetFunction.transpose(x)
+    ' update dimensions
+    temp = cy
+    cy = ry
+    ry = temp
+    temp = cx
+    cx = rx
+    rx = temp
+    Transpos = True
+End If
+
+' Make sure data matches
+If (ry <> rx) Then
+    LOGISTIC_REG = "X Y do not match"
+    Exit Function
+End If
+' Keep small for now
+If (cx > 64) Then
+    LOGISTIC_REG = "Too Large"
+    Exit Function
+End If
+
+' loop through and convert y to 1 and 0s
+For k = 1 To ry
+    If y(k, 1) <> 0 Then
+        y(k, 1) = 1
+    End If
+Next k
+' Make sure that we have more than one case
+temp = WorksheetFunction.Sum(y)
+If (temp = 0 Or temp = ry) Then
+    LOGISTIC_REG = "Only One Case"
+    Exit Function
+End If
+' Make sure the new x dimensons match
+If Not (new_x Is Nothing) Then
+    If Transpos Then
+        rnx = new_x.Columns.count
+        cnx = new_x.rows.count
+        newx = WorksheetFunction.transpose(new_x.Value)
+    Else
+        rnx = new_x.rows.count
+        cnx = new_x.Columns.count
+        newx = new_x.Value
+    End If
+    If cnx <> cx Then
+        LOGISTIC_REG = "new x doesn't match"
+        Exit Function
+    End If
+End If
+' Initialize stuff
+ReDim beta(1 To cx, 1 To 1)
+ReDim p(1 To ry)
+ReDim y_p(1 To rx, 1 To 1)
+ReDim Xh(1 To rx, 1 To cx)
+step = 1
+LogLik0 = 0.69314718056 * ry   ' log liklihood for all p = 0.5
+LogLik1 = LogLik0
+' Iteratively reweighted least squares until convergence
+For k = 1 To 20
+    LogLik2 = 0
+    ' update probabilities
+    For j = 1 To ry
+        p(j) = logistic(beta, x, j) 'calculate predicted probability at row j
+        y_p(j, 1) = y(j, 1) - p(j) ' needed for next thing
+        For i = 1 To cx
+            Xh(j, i) = p(j) * (1 - p(j)) * x(j, i)  'weighted matrix for weighted least squares
+        Next i
+        LogLik2 = LogLik2 - (y(j, 1) * Math.Log(p(j)) + (1 - y(j, 1)) * Math.Log(1 - p(j))) ' calculate log liklihood
+    Next j
+    ' If didn't decrease cost function, shorten steps
+    If LogLik2 > 1.00001 * LogLik1 Then
+        step = 0.5 * step
+    End If
+    ' calculate step and update beta
+    With Application.WorksheetFunction  ' Use with to make expression shorter
+        dL = .MMult(.transpose(x), y_p) ' gradient of log-likelihood
+        delta_beta = .MMult(.MInverse(.MMult(.transpose(x), Xh)), dL)   ' weighted least squares step
+    End With
+    For j = 1 To cx
+        beta(j, 1) = beta(j, 1) + step * delta_beta(j, 1) ' update beta with new step
+    Next j
+    ' Check convergence
+    If Math.Abs(LogLik2 - LogLik1) / Math.Abs(LogLik0) < 0.000001 And k > 1 Then
+        Exit For
+    End If
+    LogLik1 = LogLik2 'reset
+   Next k
+' Make sure it converged
+If LogLik2 > LogLik0 Or k = 21 Then
+   LOGISTIC_REG = "Didn't Converge"
+   Exit Function
+End If
+' If no new data is entered, then calculate hessian and output parameters
+ If (new_x Is Nothing) Then
+    ' Calculate the hessian final point
+    For j = 1 To ry
+        p(j) = logistic(beta, x, j) 'calculate predicted probability at row j
+        For i = 1 To cx
+            Xh(j, i) = p(j) * (1 - p(j)) * x(j, i)  'weighted matrix
+        Next i
+    Next j
+    H = WorksheetFunction.MMult(WorksheetFunction.transpose(x), Xh) 'Inverse Hessian
+    ReDim out(1 To 5, 1 To cx)
+    For k = 1 To cx
+        out(1, k) = beta(k, 1) ' Parameters
+        out(2, k) = Math.Sqr(H(k, k))   ' Standard Errors
+        If (Not out(2, k) = 0) Then
+            out(3, k) = out(1, k) / out(2, k)
+            out(4, k) = WorksheetFunction.T_Dist_2T(Math.Abs(out(3, k)), rx - cx)
+        End If
+    Next k
+    ' calculate Tjur's Psuedo RSquared
+    For j = 1 To ry
+        If y(j, 1) = 0 Then
+           mean1 = mean1 + p(j)
+        Else
+           mean2 = mean2 + p(j)
+        End If
+    Next j
+    out(5, 1) = Math.Abs(mean2 / WorksheetFunction.Sum(y) - mean1 / (ry - WorksheetFunction.Sum(y)))
+    ' put errors in the blank spots to prevent confusion
+    For k = 2 To cx
+        out(5, k) = CVErr(2042)
+    Next k
+Else ' Otherwise forecast
+ ReDim out(1 To rnx, 1 To 1)
+ For k = 1 To rnx
+    out(k, 1) = logistic(beta, newx, k) 'Forecast
+ Next k
+ If Transpos Then ' Transpose to match inputs
+    out = WorksheetFunction.transpose(out)
+ End If
+End If
+LOGISTIC_REG = out
+Exit Function
+bug:
+MsgBox " Logistic Regression Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'~~~~~~~ This Section contains the extra functions
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+' This is the logistic function
+Private Function logistic(ByRef beta As Variant, ByRef x As Variant, ByVal which_row As Integer) As Double
+'   On Error GoTo bug
+    Dim n, k As Integer
+    Dim temp As Double
+    Dim out As Double
+    n = UBound(beta, 1) ' find size
+    temp = 0
+    ' loop through and calculate beta dot X
+    For k = 1 To n
+        temp = temp + beta(k, 1) * x(which_row, k)
+    Next k
+    out = 1 / (1 + Math.Exp(-temp))
+    logistic = out
+    Exit Function
+bug:
+MsgBox " Logistic Function Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+

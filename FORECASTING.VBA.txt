@@ -1,0 +1,678 @@
+'Version 1.0
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+' Set options
+Option Base 1
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'~~~~~~~ This Section contains functions that interface with Excel and the end user
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+'Forecasting function
+Public Function FORECASTING(datain As Range, Optional Period As Integer = 0, Optional damping As Boolean = False, Optional output As Integer = 0) As Variant
+'On Error GoTo bug
+Dim rin, cin, leng, fleng As Integer
+Dim rout, cout As Integer
+Dim n, m As Integer
+Dim data As Variant
+Dim temp_d As Double
+Dim t As Double
+Dim d, sc As Double
+Dim L(), S(), Av() As Double
+Dim Out As Variant
+Dim forecast(), xd() As Double
+Dim AorM, return_fcst As Boolean
+Dim solverout As Variant
+Dim parameters As Variant
+Dim ss As Double
+
+
+' Output shape
+rout = Application.Caller.rows.count
+cout = Application.Caller.Columns.count
+t = 0
+' Only do forecast stuff if it is called for
+If (output < 1) Or (output > 3) Then
+    return_fcst = True
+    If Period = 0 Then
+        fleng = 1
+    ElseIf (rout > cout) Then
+        fleng = rout
+    Else
+        fleng = cout
+    End If
+    ReDim forecast(1 To fleng)
+Else
+    return_fcst = False
+End If
+
+' Input shape
+data = datain.Value
+rin = datain.rows.count
+cin = datain.Columns.count
+
+' Make sure univariate input
+If (rin > 1 And cin > 1) Then
+    FORECASTING = "Single Variate Data Only"
+    Exit Function
+End If
+
+' Find which dimenson is greater
+If rin > 1 Then
+    leng = rin
+Else
+    leng = cin
+    data = WorksheetFunction.Transpose(data)
+End If
+ReDim L(1 To (leng))
+' Which kind of forecast?
+Select Case Period
+    Case -1  'Browns Exponential Smoothing
+        If leng < 3 Then
+            FORECASTING = "Need More Data"
+            Exit Function
+        End If
+        ReDim parameters(1, 1)
+        solverout = ES_Solver(-1, parameters, data, L, t)
+        If return_fcst Then
+            For k = 1 To fleng
+                forecast(k) = L(leng) + k * t
+            Next k
+        End If
+    Case 0 ' Simple Exponential Smoothing
+        If leng < 3 Then
+            FORECASTING = "Need More Data"
+            Exit Function
+        End If
+        L(1) = data(1, 1)
+        ReDim parameters(1, 1)
+        solverout = ES_Solver(0, parameters, data, L, t)
+        If return_fcst Then
+            forecast(1) = L(leng)
+        End If
+    Case 1  ' Double Exponential smoothing
+        If leng < 4 Then
+            FORECASTING = "Need More Data"
+            Exit Function
+        End If
+
+        If damping Then
+            ReDim parameters(3, 1)
+            solverout = ES_Solver(1.5, parameters, data, L, t)
+            d = parameters(3, 1)
+        Else
+            ReDim parameters(2, 1)
+            solverout = ES_Solver(1, parameters, data, L, t)
+            d = 1
+        End If
+        If return_fcst Then
+            tempd = d
+            For k = 1 To fleng
+                forecast(k) = L(leng) + tempd * t
+                tempd = ((d) ^ (k + 1)) + tempd
+            Next k
+        End If
+    Case Else  '  Triple Exponential  Smoothing
+        AorM = Period < 0 ' True if additive
+        Period = Math.Abs(Period)
+        If leng < Period + 4 Then
+            FORECASTING = "Need More Data"
+            Exit Function
+        End If
+        ' Setup variables
+        n = Int(leng / Period)
+        ReDim S(1 To leng)
+        ReDim Av(1 To n)
+        ' initialize slope
+        For k = (Period + 1) To (2 * Period)
+            t = t + (data(k, 1) - data(k - Period, 1)) / Period
+        Next k
+            On Error GoTo bug
+         t = t / Period
+         'If multiplicative check
+         If (Not AorM) Then
+            For k = 1 To leng
+                If (data(k, 1) <= 0) Then
+                    FORECASTING = "MTES needs Positive Data"
+                    Exit Function
+                End If
+            Next k
+        End If
+        ' Average of each period
+        For k = 1 To n
+            Av(k) = 0
+            For j = 1 To Period
+                Av(k) = Av(k) + data(((k - 1) * Period + j), 1)
+            Next j
+            Av(k) = Av(k) / Period
+        Next k
+     
+        ' initialize seasonal values
+        For k = 1 To Period
+            For j = 1 To n
+                If AorM Then
+                    S(k) = S(k) + data((j - 1) * Period + k, 1) - Av(j)
+                Else
+                    S(k) = S(k) + data((j - 1) * Period + k, 1) / Av(j)
+                End If
+            Next j
+            S(k) = S(k) / n
+            ss = ss + S(k)
+        Next k
+        ' Make sure initialization is unbiased
+                    ss = ss / Period
+        If AorM Then
+            For k = 1 To Period
+                S(k) = S(k) - ss
+                L(k) = Av(1)
+            Next k
+        Else
+            For k = 1 To Period
+                S(k) = S(k) / ss
+                L(k) = Av(1)
+            Next k
+        End If
+                
+        ' Choose damping and additive vs multiplcative TES
+        If damping Then
+            ReDim parameters(5, 1)
+            parameters(5, 1) = Period
+            If AorM Then
+                solverout = ES_Solver(-2.5, parameters, data, L, t, S)
+            Else
+                solverout = ES_Solver(2.5, parameters, data, L, t, S)
+            End If
+            d = parameters(4, 1)
+        Else
+            ReDim parameters(4, 1)
+            parameters(4, 1) = Period
+            If AorM Then
+                solverout = ES_Solver(-2, parameters, data, L, t, S)
+            Else
+                solverout = ES_Solver(2, parameters, data, L, t, S)
+            End If
+            d = 1
+        End If
+        If output = 1 Then
+            For k = 1 To leng
+                If (AorM) Then
+                    L(k) = L(k) + S(k)
+                Else
+                    L(k) = L(k) * S(k)
+                End If
+            Next k
+        End If
+        If return_fcst Then
+            tempd = d
+            m = leng - Period + 1
+            For k = 1 To fleng
+                If (AorM) Then
+                    forecast(k) = L(leng) + tempd * t + S(m + ((k - 1) Mod Period))
+                Else
+                    forecast(k) = (L(leng) + tempd * t) * S(m + ((k - 1) Mod Period))
+                End If
+                tempd = ((d) ^ (k + 1)) + tempd
+            Next k
+        End If
+End Select
+' What to output
+Select Case output
+    Case 1
+        Out = L ' output smoothed values
+    Case 2
+        Out = solverout
+    Case 3
+        Out = WorksheetFunction.Transpose(parameters) ' output parameters
+    Case Else
+        Out = forecast 'output forecast
+End Select
+
+' Output here and make sure it is the right shape
+If (rout > rcols) Then
+    FORECASTING = WorksheetFunction.Transpose(Out)
+Else
+    FORECASTING = Out
+End If
+Exit Function
+bug:
+MsgBox " FORECASTING Error: (" & Err.Number & ") " & Err.Description, vbCritical
+
+
+End Function
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'~~~~~~~ This Section contains functions to run different types of Exponential Smoothing
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Private Function SimpleES(ByRef data As Variant, ByRef L As Variant, ByRef alpha As Variant) As Double
+' Declare  Variables
+Dim n As Integer
+Dim cost As Double
+Dim alpha_c As Double
+'On error GoTo bug
+' initialize
+alpha_c = 1 - alpha ' Compute this only once per function call
+n = UBound(L)
+' loop through and fit model
+For k = 2 To n
+   L(k) = alpha * data(k - 1, 1) + alpha_c * L(k - 1) ' Simple exponential smoothing
+   cost = (L(k) - data(k, 1)) ^ 2 + cost ' Compute the sum squared error of 1-ahead forecast
+Next k
+' Return Cost (Smoothed trend L is changed inside function)
+SimpleES = cost
+Exit Function
+bug:
+MsgBox " SimpleES Engine Error: (" & Err.Number & ") " & Err.Description, vbCritical
+
+End Function
+
+
+' This is the engine of "double exponential smoothing" options
+' This function fits a linear trend with additive errors, also it allows for damping
+' It returns the sum squared cost of one-ahead forecasted values
+' It reads in the the smoothed values L and changes them in memory
+Private Function DoubleES(ByRef data As Variant, ByRef L As Variant, ByRef alpha As Variant, ByRef t As Double, ByRef beta As Variant, ByRef damping As Variant) As Double
+' Declare  Variables
+Dim n As Integer
+Dim cost As Double
+Dim alpha_c As Double
+Dim beta_c As Double
+Dim damped_t As Double
+Dim phi As Double
+' transform damping
+phi = damping ' * 0.95 + 0.05
+' initialize
+alpha_c = 1 - alpha ' Compute this only once per function call
+beta_c = 1 - beta ' Compute this only once per function call
+n = UBound(L)
+' initial values
+L(1) = data(1, 1)
+t = (data(2, 1) - data(1, 1))
+' loop through and fit model
+For k = 2 To n
+    damped_t = phi * t ' compute this only once per k
+    cost = (damping_t + L(k - 1) - data(k, 1)) ^ 2 + cost ' Compute the sum squared error of 1-ahead forecast
+    L(k) = alpha * data(k, 1) + alpha_c * (damped_t + L(k - 1)) ' Update the level variable L
+    t = beta * (L(k) - L(k - 1)) + beta_c * damped_t ' Update the slope or trend t
+Next k
+' Return Cost (Smoothed trend L is changed inside function)
+DoubleES = cost
+End Function
+
+' This is the engine of "Triple exponential smoothing (Multiplicative)" options
+' This function fits a linear trend with additive errors, also it allows for damping
+' It also fits a multiplicative seasonal or periodic term
+' It returns the sum squared cost of one-ahead forecasted values
+' It reads in the the smoothed values L and changes them in memory
+Private Function MTripleES(ByRef data As Variant, ByRef L As Variant, ByRef alpha As Variant, ByRef t As Double, ByRef beta As Variant, ByRef damping As Variant, ByRef S As Variant, ByRef gamma As Variant, ByRef Period As Variant) As Double
+'On Error GoTo bug
+' Declare  Variables
+Dim n As Integer
+Dim cost As Double
+Dim alpha_c As Double
+Dim beta_c As Double
+Dim gamma_c As Double
+Dim phi As Double
+' initialize
+alpha_c = 1 - alpha ' Compute these only once per function call
+beta_c = 1 - beta
+gamma_c = 1 - gamma
+n = UBound(L)
+phi = damping ' * 0.95 + 0.05
+'Fit model
+For k = (Period + 1) To n
+    damped_t = phi * t ' compute this only once per k
+    cost = (S(k - Period) * (damping_t + L(k - 1)) - data(k, 1)) ^ 2 + cost ' Compute the sum squared error of 1-ahead forecast
+    L(k) = alpha * (data(k, 1) / S(k - Period)) + alpha_c * (damped_t + L(k - 1)) ' Update the level variable L
+    t = beta * (L(k) - L(k - 1)) + beta_c * damped_t ' Update the slope or trend t
+    S(k) = gamma * (data(k, 1) / L(k)) + gamma_c * S(k - Period) ' Update the seasonal values
+Next k
+' Return Cost (Smoothed trend L is changed inside function)
+MTripleES = cost
+Exit Function
+bug:
+MsgBox " MTES Engine Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+' This is the engine of "Triple exponential smoothing" options
+' This function fits a linear trend with additive errors, also it allows for damping
+' It also fits an additive seasonal or periodic term
+' It returns the sum squared cost of one-ahead forecasted values
+' It reads in the the smoothed values L and changes them in memory
+Private Function ATripleES(ByRef data As Variant, ByRef L As Variant, ByRef alpha As Variant, ByRef t As Double, ByRef beta As Variant, ByRef damping As Variant, ByRef S As Variant, ByRef gamma As Variant, ByRef Period As Variant) As Double
+'On Error GoTo bug
+' Declare  Variables
+Dim n As Integer
+Dim cost As Double
+Dim alpha_c As Double
+Dim beta_c As Double
+Dim gamma_c As Double
+Dim phi As Double
+' Some initial stuff
+alpha_c = 1 - alpha ' Compute this only once per function call
+beta_c = 1 - beta
+gamma_c = 1 - gamma
+phi = damping '* 0.95 + 0.05
+n = UBound(L)
+' loop through and fit model
+For k = (Period + 1) To n
+    damped_t = phi * t ' compute this only once per k
+    cost = (S(k - Period) + damping_t + L(k - 1) - data(k, 1)) ^ 2 + cost ' Compute the sum squared error of 1-ahead forecast
+    L(k) = alpha * (data(k, 1) - S(k - Period)) + alpha_c * (damped_t + L(k - 1)) ' Update the level variable L
+    t = beta * (L(k) - L(k - 1)) + beta_c * damped_t ' Update the slope or trend t
+    S(k) = gamma * (data(k, 1) - L(k)) + gamma_c * S(k - Period) ' Update the seasonal values
+Next k
+' Return Cost (Smoothed trend L is changed inside function)
+ATripleES = cost
+Exit Function
+bug:
+MsgBox " ATES Engine Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+
+' This is an alternative to double exponential smoothing,
+' sometimes refered to as Browns Double Exponential Smoothing
+Private Function BrownsES(ByRef data As Variant, ByRef L As Variant, ByRef alpha As Variant, ByRef t As Double) As Double
+' Declare  Variables
+Dim n As Integer
+Dim cost As Double
+Dim s1 As Double
+Dim s2 As Double
+Dim alpha_c As Double
+Dim alpha_ratio As Double
+' initialize
+alpha_c = 1 - alpha ' Compute this only once per function call
+If (alpha_c = 0) Then  ' make sure we don't divide by zero
+    alpha_ratio = 1
+Else
+    alpha_ratio = alpha / alpha_c
+End If
+
+
+n = UBound(L)
+' Initialize variables
+cost = 0
+s1 = data(1, 1)
+s2 = s1
+L(1) = s2
+t = alpha_ratio * (s1 - s2)
+' loop through and fit model
+For k = 2 To n
+    cost = (L(k - 1) + t - data(k, 1)) ^ 2 + cost ' Compute the sum squared error of 1-ahead forecast
+    s1 = alpha * data(k, 1) + alpha_c * s1
+    s2 = alpha * s2 + alpha_c * s1
+    t = alpha_ratio * (s1 - s2)
+    L(k) = 2 * s1 - s2 'compute the level for cost function
+Next k
+' Return Cost (Smoothed trend L is changed inside function)
+BrownsES = cost
+End Function
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'~~~~~ This Section is the set of functions used to fit the models ~~~~~~
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+'Line Search
+' Translated from code provided here http://www.netlib.org/fmm/fmin.f
+Private Function LineSearch(ByRef parameter As Variant, ByVal Method As Single, ByRef data As Variant, ByRef L As Variant, Optional ByRef t As Double, Optional ByRef S As Variant) As Double
+    Dim a, b, c, d, e, xm, p, q, r, tol1, tol2, v, w As Double
+    Dim fu, fv, fw, fx As Double
+    Dim x As Double
+    Dim u As Double
+    Dim count As Integer
+    Dim ind As Integer
+    'On Error GoTo LineSearchError
+    c = 0.5 * (3# - Math.Sqr(5#))          ' Golden Ratio
+    ' Initialize
+    a = 0
+    b = 1
+    v = a + c * (b - a)
+    tol1 = 0.00001
+    tol2 = 0.00001
+    v = a + c * (b - a)
+    w = v
+    x = v
+    e = 0#
+    parameter(1, 1) = x
+    fx = CostFunction(parameter, Method, data, L, t, S) 'f(x)
+    fv = fx
+    fw = fx
+
+    ' main loop starts here
+
+20: xm = 0.5 * (a + b)
+    tol1 = eps * Math.Abs(x) + tol / 3#
+    tol2 = 2# * tol1
+    count = count + 1
+    'MsgBox "Count: " & count
+    ' check stopping criterion
+
+    If (Math.Abs(x - xm) <= 0.0001) Then GoTo 90
+    If count > 30 Then
+        GoTo 90
+    End If
+    'is golden-section necessary
+
+    If (Math.Abs(e) <= tol1) Then GoTo 40
+
+    ' fit parabola
+
+    r = (x - w) * (fx - fv)
+    q = (x - v) * (fx - fw)
+    p = (x - v) * q - (x - w) * r
+    q = 2# * (q - r)
+    If (q > 0#) Then p = -p
+    q = Math.Abs(q)
+    r = e
+    e = d
+
+    ' is parabola acceptable
+
+30: If (Math.Abs(p) >= Math.Abs(0.5 * q * r)) Then GoTo 40
+    If (p <= q * (a - x)) Then GoTo 40
+    If (p >= q * (b - x)) Then GoTo 40
+
+    ' a parabolic interpolation step
+
+    d = p / q
+    u = x + d
+
+    ' f must not be evaluated too close to ax or bx
+
+    If ((u - a) < tol2) Then d = tol1 * Math.Sgn(xm - x)
+    If ((b - u) < tol2) Then d = tol1 * Math.Sgn(xm - x)
+    GoTo 50
+
+    ' a golden-section step
+
+40: If (x >= xm) Then e = a - x
+    If (x < xm) Then e = b - x
+    d = c * e
+
+    'f must not be evaluated too close to x
+
+50:
+    If (Math.Abs(d) >= tol1) Then u = x + d
+    If (Math.Abs(d) < tol1) Then u = x + tol1 * Math.Sgn(d)
+    parameter(1, 1) = u
+    fu = CostFunction(parameter, Method, data, L, t, S) 'f(u)
+    ' update  a, b, v, w, and x
+
+    If (fu > fx) Then GoTo 60
+    If (u >= x) Then a = x
+    If (u < x) Then b = x
+    v = w
+    fv = fw
+    w = x
+    fw = fx
+    x = u
+    fx = fu
+    GoTo 20
+
+60: If (u < x) Then a = u
+    If (u >= x) Then b = u
+    If (fu <= fw) Then GoTo 70
+    If (w = x) Then GoTo 70
+    If (fu <= fv) Then GoTo 80
+    If (v = x) Then GoTo 80
+    If (v = w) Then GoTo 80
+    GoTo 20
+70: v = w
+    fv = fw
+    w = u
+    fw = fu
+    GoTo 20
+80: v = u
+    fv = fu
+    GoTo 20
+
+    ' end of main loop
+
+90: LineSearch = fx
+    Exit Function
+    End
+LineSearchError:
+    MsgBox " Line Search Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+'This function is the cost function for the Solver
+Private Function CostFunction(ByVal parameters As Variant, ByVal Method As Single, ByRef data As Variant, ByRef L As Variant, Optional ByRef t As Double, Optional ByRef S As Variant) As Double
+Dim alpha, beta, gamma, damping As Double
+'On Error GoTo bug:
+Select Case Method
+    Case -2.5 'Damped Additive Triple ES
+        alpha = 1 / (1 + Math.Exp(-parameters(1, 1)))
+        beta = 1 / (1 + Math.Exp(-parameters(2, 1)))
+        gamma = 1 / (1 + Math.Exp(-parameters(3, 1)))
+        damping = 1 / (1 + Math.Exp(-parameters(4, 1)))
+        CostFunction = ATripleES(data, L, alpha, t, beta, damping, S, gamma, parameters(5, 1))
+    Case -2 'Additive Triple ES
+        alpha = 1 / (1 + Math.Exp(-parameters(1, 1)))
+        beta = 1 / (1 + Math.Exp(-parameters(2, 1)))
+        gamma = 1 / (1 + Math.Exp(-parameters(3, 1)))
+        CostFunction = ATripleES(data, L, alpha, t, beta, 1, S, gamma, parameters(4, 1)) 'no damping
+    Case -1 'Double ES
+        alpha = parameters(1, 1)
+        CostFunction = BrownsES(data, L, alpha, t) ' no damping
+    Case 0 'Double ES
+        alpha = parameters(1, 1)
+        CostFunction = SimpleES(data, L, alpha) ' no damping
+    Case 1 'Double ES
+        alpha = 1 / (1 + Math.Exp(-parameters(1, 1)))
+        beta = 1 / (1 + Math.Exp(-parameters(2, 1)))
+        CostFunction = DoubleES(data, L, alpha, t, beta, 1) ' no damping
+    Case 1.5  'Damped Double ES
+        alpha = 1 / (1 + Math.Exp(-parameters(1, 1)))
+        beta = 1 / (1 + Math.Exp(-parameters(2, 1)))
+        damping = 1 / (1 + Math.Exp(-parameters(3, 1)))
+        CostFunction = DoubleES(data, L, alpha, t, beta, damping) '  damping
+    Case 2  'Multiplicative Triple ES
+        alpha = 1 / (1 + (Math.Exp(-parameters(1, 1))))
+        beta = 1 / (1 + (Math.Exp(-parameters(2, 1))))
+        gamma = 1 / (1 + (Math.Exp(-parameters(3, 1))))
+        CostFunction = MTripleES(data, L, alpha, t, beta, 1, S, gamma, parameters(4, 1))
+    Case 2.5 'Damped Multiplicative Triple ES
+        alpha = 1 / (1 + (Math.Exp(-parameters(1, 1))))
+        beta = 1 / (1 + (Math.Exp(-parameters(2, 1))))
+        gamma = 1 / (1 + (Math.Exp(-parameters(3, 1))))
+        damping = 1 / (1 + (Math.Exp(-parameters(4, 1))))
+        CostFunction = MTripleES(data, L, alpha, t, beta, damping, S, gamma, parameters(5, 1))
+End Select
+Exit Function
+bug:
+MsgBox " Cost Function Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+
+'Hooke-Jeeves Optimizer for ES code
+Private Function ES_Solver(Method As Single, ByRef parameters As Variant, ByRef data As Variant, ByRef L As Variant, Optional ByRef t As Double, Optional ByRef S As Variant) As Double
+Dim n As Integer
+Dim j As Integer
+Dim cost0, cost1 As Double
+Dim tau As Double
+Dim temp As Double
+Dim del  As Double
+Dim parameter(1 To 5, 1 To 1) As Double
+Dim parameter0(1 To 4, 1 To 1) As Double
+Dim pattern As Boolean
+' On Error GoTo bug
+
+
+
+'Decrease Step Size by this
+tau = 0.7
+'Size of problem
+Select Case Method
+    Case -2.5, 2.5
+        n = 4
+        parameter(4, 1) = 3
+        parameter(5, 1) = parameters(5, 1)
+    Case -2, 2
+        n = 3
+        parameter(4, 1) = parameters(4, 1)
+    Case 1.5
+        n = 3
+        parameter(3, 1) = 3
+    Case 0, -1
+        ES_Solver = LineSearch(parameters, Method, data, L, t)
+        Exit Function
+    Case 1
+        n = 2
+End Select
+' Initialize
+del = 0.5
+cost0 = CostFunction(parameter, Method, data, L, t, S)
+'loop
+For k = 1 To 100 'it
+    For j = 1 To n
+        parameter0(j, 1) = parameter(j, 1)
+    Next j
+    
+    ' Exploratory Search
+    pattern = False
+   For j = 1 To n
+            temp = parameter(j, 1) ' store this
+            ' go up by del
+            parameter(j, 1) = temp + del
+            cost1 = CostFunction(parameter, Method, data, L, t, S)
+            
+            If (cost1 < cost0) Then
+                cost0 = cost1
+                pattern = True
+            Else ' try going down by del
+                parameter(j, 1) = temp - del
+                cost1 = CostFunction(parameter, Method, data, L, t, S)
+                If (cost1 < cost0) Then
+                    cost0 = cost1
+                    pattern = True
+                Else ' didn't work
+                    parameter(j, 1) = temp
+                End If
+            End If
+        Next j
+    If pattern Then
+        For i = 1 To n
+            parameter(i, 1) = 2 * parameter(i, 1) - parameter0(i, 1)
+        Next i
+        cost1 = CostFunction(parameter, Method, data, L, t, S)
+        If (cost1 < cost0) Then 'if successful, update current position
+            cost0 = cost1
+            For i = 1 To n
+                parameter0(i, 1) = parameter(i, 1)
+            Next i
+        Else  'not  successful, don't update current position
+            For i = 1 To n
+                parameter(i, 1) = 0.5 * (parameter0(i, 1) + parameter(i, 1))
+            Next i
+        End If
+        explore = False
+    Else ' Pattern Search
+        If del < 0.00001 Then
+            Exit For ' Check convergence
+        End If
+        If Not pattern Then
+            del = tau * del
+        End If
+    End If
+Next k
+For k = 1 To n
+    parameters(k, 1) = 1 / (1 + Math.Exp(-parameter(k, 1)))
+Next k
+
+ES_Solver = CostFunction(parameter, Method, data, L, t, S)
+Exit Function
+bug:
+MsgBox " Solver Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function

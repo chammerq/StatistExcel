@@ -1,0 +1,294 @@
+'BOXCOX_REG
+'Version 1.0
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+' Set options
+Option Base 1
+Option Explicit
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'~~~~~~~ This Section contains the function that interface with Excel and the end user
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Public Function PowerTransform(ByVal x As Double, ByVal L As Double, Optional Inverse As Boolean = False)
+If Inverse Then
+    If Math.Abs(L) < 0.01 Then
+        PowerTransform = Math.Exp(x)
+    Else
+       PowerTransform = (L * x + 1) ^ (1 / L)
+    End If
+Else
+    If Math.Abs(L) < 0.01 Then
+        PowerTransform = Math.Log(x)
+    Else
+       PowerTransform = ((x) ^ (L) - 1) / L
+    End If
+
+End If
+End Function
+'Forecasting function
+Public Function BOXCOX_REG(known_y As Range, known_x As Range, Optional lambda As Double = -10, Optional Constant As Boolean = False, Optional new_x As Range = Nothing) As Variant
+Dim k, j As Integer
+Dim dof As Integer
+Dim ry, cy, rx, cx, cnx, rnx, dx As Integer
+Dim y As Variant
+Dim newy As Variant
+Dim x As Variant
+Dim temp As Double
+Dim lny As Double
+Dim results As Variant
+Dim out As Variant
+Dim Transpos As Boolean
+'On Error GoTo bug
+
+' Get size, shapes and data
+y = known_y.Value
+ry = known_y.rows.count
+cy = known_y.Columns.count
+x = known_x.Value
+rx = known_x.rows.count
+cx = known_x.Columns.count
+' Make sure y is univariate data
+If (ry > 1 And cy > 1) Then
+    BOXCOX_REG = "Univariate Only"
+    Exit Function
+End If
+' Transpose for linest
+Transpos = False
+If (cy > ry) Then
+    y = WorksheetFunction.transpose(y)
+    x = WorksheetFunction.transpose(x)
+    ' update dimensions
+    temp = cy
+    cy = ry
+    ry = temp
+    temp = cx
+    cx = rx
+    rx = temp
+    Transpos = True
+End If
+
+' Make sure data matches
+If (ry <> rx) Then
+    BOXCOX_REG = "X Y do not match"
+    Exit Function
+End If
+' Keep small for now
+If (cx > 64) Then
+    BOXCOX_REG = "Too Large"
+    Exit Function
+End If
+'
+If Math.Abs(lambda) > 3 Then
+ For k = 1 To ry
+    newy(k) = PowerTransform(y(k), lambda)
+    lny = lny + Math.Log(y(k))
+ Next k
+Else
+    lambda = LineSearch(y, x, ry, lny)
+    For k = 1 To ry
+        newy(k) = PowerTransform(y(k), lambda)
+    Next k
+    
+End If
+
+If Not (new_x Is Nothing) Then  ' Forecast
+' Make sure the new x dimensons match
+    If Transpos Then
+        rnx = new_x.Columns.count
+        cnx = new_x.rows.count
+    Else
+        rnx = new_x.rows.count
+        cnx = new_x.Columns.count
+    End If
+    If cnx <> cx Then
+        BOXCOX_REG = "new x doesn't match"
+        Exit Function
+    End If
+    results = WorksheetFunction.LinEst(newy, x, False, False)
+    ' loop through and forecast
+    ReDim out(1 To rnx, 1 To 1)
+    For k = 1 To rnx
+        For j = 1 To cnx
+            If Transpos Then
+                out(k, 1) = out(k, 1) + results(cx - j + 1) * new_x(j, k)
+            Else
+                out(k, 1) = out(k, 1) + results(cx - j + 1) * new_x(k, j)
+            End If
+        Next j
+        If Constant Then
+            out(k, 1) = out(k, 1) + results(cx + 1)
+        End If
+    Next k
+    If Transpos Then ' Transpose to match inputs
+        out = WorksheetFunction.transpose(out)
+    End If
+
+Else ' Otherwise calculate statistics
+    results = WorksheetFunction.LinEst(newy, x, False, True)
+    If Constant Then 'increase dimension by one
+        dx = cx + 1
+    Else
+        dx = cx
+    End If
+    dof = results(4, 2)
+    ReDim out(1 To 7, 1 To WorksheetFunction.Max(2, dx))
+    ' flip parameters and calcuate more stuff
+    For k = 1 To dx
+        out(1, k) = results(1, dx - k + 1)
+        out(2, k) = results(2, dx - k + 1)
+        If (Not out(2, k) = 0) Then
+            out(3, k) = out(1, k) / out(2, k)
+            out(4, k) = WorksheetFunction.T_Dist_2T(Math.Abs(out(3, k)), dof)
+        End If
+    Next k
+    ' copy the rest
+    For k = 5 To 7
+        For j = 1 To dx
+           If j < 3 Then
+                out(k, j) = results(k - 2, j)
+            Else
+                out(k, j) = CVErr(2042)
+            End If
+        Next j
+    Next k
+End If
+BOXCOX_REG = out
+Exit Function
+bug:
+MsgBox "Transformed Regression Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
+
+
+' Private function for maximizing the log likelihood
+'Line Search
+' Translated from code provided here http://www.netlib.org/fmm/fmin.f
+Private Function LineSearch(ByVal y As Variant, ByVal xreg As Variant, ByVal n As Integer, ByVal lny As Double) As Double
+    Dim a, b, c, d, e, xm, p, q, r, tol1, tol2, v, w As Double
+    Dim fu, fv, fw, fx As Double
+    Dim x As Double
+    Dim u As Double
+    Dim count As Integer
+    Dim k As Integer
+    Dim ind As Integer
+    Dim newy As Variant
+    ReDim newy(1 To n)
+    Dim out As Variant
+    
+    'On Error GoTo LineSearchError
+    c = 0.5 * (3# - Math.Sqr(5#))          ' Golden Ratio
+    ' Initialize
+    a = 0
+    b = 1
+    v = a + c * (b - a)
+    tol1 = 0.00001
+    tol2 = 0.00001
+    v = a + c * (b - a)
+    w = v
+    x = v
+    e = 0#
+    ' Cost Function evaluation
+    For k = 1 To n
+        newy(k) = PowerTransform(y(k), x)
+    Next k
+    out = WorksheetFunction.LinEst(y, xreg, 0, 1)
+    fx = -0.5 * n * Math.Log(out(5, 2)) - (x - 1) * lny
+    '''''''''''''''''''''''''
+    fv = fx
+    fw = fx
+
+    ' main loop starts here
+
+20: xm = 0.5 * (a + b)
+    count = count + 1
+    'MsgBox "Count: " & count
+    ' check stopping criterion
+
+    If (Math.Abs(x - xm) <= 0.0001) Then GoTo 90
+    If count > 30 Then
+        GoTo 90
+    End If
+    'is golden-section necessary
+
+    If (Math.Abs(e) <= tol1) Then GoTo 40
+
+    ' fit parabola
+
+    r = (x - w) * (fx - fv)
+    q = (x - v) * (fx - fw)
+    p = (x - v) * q - (x - w) * r
+    q = 2# * (q - r)
+    If (q > 0#) Then p = -p
+    q = Math.Abs(q)
+    r = e
+    e = d
+
+    ' is parabola acceptable
+
+30: If (Math.Abs(p) >= Math.Abs(0.5 * q * r)) Then GoTo 40
+    If (p <= q * (a - x)) Then GoTo 40
+    If (p >= q * (b - x)) Then GoTo 40
+
+    ' a parabolic interpolation step
+
+    d = p / q
+    u = x + d
+
+    ' f must not be evaluated too close to ax or bx
+
+    If ((u - a) < tol2) Then d = tol1 * Math.Sgn(xm - x)
+    If ((b - u) < tol2) Then d = tol1 * Math.Sgn(xm - x)
+    GoTo 50
+
+    ' a golden-section step
+
+40: If (x >= xm) Then e = a - x
+    If (x < xm) Then e = b - x
+    d = c * e
+
+    'f must not be evaluated too close to x
+
+50:
+    If (Math.Abs(d) >= tol1) Then u = x + d
+    If (Math.Abs(d) < tol1) Then u = x + tol1 * Math.Sgn(d)
+        ' Cost Function evaluation
+    For k = 1 To n
+        newy(k) = PowerTransform(y(k), u)
+    Next k
+    out = WorksheetFunction.LinEst(newy, xreg, 0, 1)
+    fu = -0.5 * n * Math.Log(out(5, 2)) - (x - 1) * lny
+    ' update  a, b, v, w, and x
+
+    If (fu > fx) Then GoTo 60
+    If (u >= x) Then a = x
+    If (u < x) Then b = x
+    v = w
+    fv = fw
+    w = x
+    fw = fx
+    x = u
+    fx = fu
+    GoTo 20
+
+60: If (u < x) Then a = u
+    If (u >= x) Then b = u
+    If (fu <= fw) Then GoTo 70
+    If (w = x) Then GoTo 70
+    If (fu <= fv) Then GoTo 80
+    If (v = x) Then GoTo 80
+    If (v = w) Then GoTo 80
+    GoTo 20
+70: v = w
+    fv = fw
+    w = u
+    fw = fu
+    GoTo 20
+80: v = u
+    fv = fu
+    GoTo 20
+
+    ' end of main loop
+
+90: LineSearch = x
+    Exit Function
+    End
+LineSearchError:
+    MsgBox " Line Search Error: (" & Err.Number & ") " & Err.Description, vbCritical
+End Function
